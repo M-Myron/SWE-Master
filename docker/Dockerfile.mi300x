@@ -1,0 +1,111 @@
+# syntax=docker/dockerfile:1
+#
+# SWE-Master serving + agent image for Singularity MI300X (ROCm).
+#
+# Layers on the proven ROCm/vLLM base (serves Qwen3-Coder-480B on MI300X, validated).
+# Adds:
+#   * system tools needed by the in-job orchestration: socat, iproute2 (ss), jq,
+#     the Docker CLI client (talks to a REMOTE dockerd over a Cloudflare tunnel),
+#     cloudflared, and uv.
+#   * an ISOLATED Python venv (/opt/venvs/swe-agent) for the R2E-Gym agent with the
+#     exact dependency set validated on the GCR dev box. It is kept separate from the
+#     base system Python on purpose: the base ships transformers 5.x / huggingface_hub
+#     1.x for serving, which is incompatible with R2E-Gym's agent code.
+#
+# The image bakes ENV (dependencies) only. The actual SWE-Master source is cloned
+# fresh from GitHub at job time and re-pointed into the venv with `pip install -e
+# --no-deps`, so code/patches never need to be re-applied per run.
+#
+# SFT (OpenRLHF) and RL (verl/rLLM) venvs are intentionally NOT included yet — their
+# upstream pins are CUDA-only and require MI300X to validate. They will be layered in
+# a follow-up once verified. Structure below leaves a clear seam for them.
+
+ARG BASE_IMAGE=msraairgroup.azurecr.io/rocm-swift-megatron:ubuntu22.04-rocm7.2.0-py312-torch2.10.0-vllm0.18.1-modelscope1.35.1-swift4.1.0
+FROM ${BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_INPUT=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# ----------------------------------------------------------------------------
+# 1) System tools
+# ----------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        socat \
+        iproute2 \
+        jq \
+        ca-certificates \
+        curl \
+        git \
+        tini \
+    && rm -rf /var/lib/apt/lists/*
+
+# Docker CLI client only (the daemon runs on the REMOTE host; we talk to it over TCP).
+ARG DOCKER_CLI_VERSION=27.5.1
+RUN curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz" \
+      -o /tmp/docker.tgz \
+    && tar -xzf /tmp/docker.tgz -C /tmp \
+    && install -m 0755 /tmp/docker/docker /usr/local/bin/docker \
+    && rm -rf /tmp/docker /tmp/docker.tgz \
+    && docker --version
+
+# cloudflared (raw-TCP tunnel client for the remote Docker host).
+RUN curl -fsSL \
+      "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64" \
+      -o /usr/local/bin/cloudflared \
+    && chmod +x /usr/local/bin/cloudflared \
+    && /usr/local/bin/cloudflared --version
+
+# uv (fast resolver; used by SWE-Master's official setup and the future SFT/RL venvs).
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh \
+    && uv --version
+
+# ----------------------------------------------------------------------------
+# 2) Agent venv (isolated from base system Python)
+#    Dependency set mirrors the GCR-validated `swe-master` env.
+# ----------------------------------------------------------------------------
+ENV SWE_AGENT_VENV=/opt/venvs/swe-agent
+ENV SWE_BAKED_SRC=/opt/swe/SWE-Master
+
+# Copy only what the agent venv needs to RESOLVE its dependencies. The build
+# context is the repo root; .dockerignore keeps .venv/.git/etc. out.
+COPY R2E-Gym ${SWE_BAKED_SRC}/R2E-Gym
+COPY swebench_fork_swegym-2.0.13-py3-none-any.whl \
+     swebench_fork_swerebench-4.0.3-py3-none-any.whl \
+     swesmith-0.0.7-py3-none-any.whl \
+     ${SWE_BAKED_SRC}/
+
+RUN python -m venv ${SWE_AGENT_VENV} \
+    && ${SWE_AGENT_VENV}/bin/pip install --no-cache-dir --upgrade pip setuptools wheel \
+    # Install R2E-Gym (editable) + its declared deps.
+    && ${SWE_AGENT_VENV}/bin/pip install --no-cache-dir -e ${SWE_BAKED_SRC}/R2E-Gym \
+    # SWE dataset harnesses (the three local wheels).
+    && ${SWE_AGENT_VENV}/bin/pip install --no-cache-dir \
+         ${SWE_BAKED_SRC}/swebench_fork_swegym-2.0.13-py3-none-any.whl \
+         ${SWE_BAKED_SRC}/swebench_fork_swerebench-4.0.3-py3-none-any.whl \
+         ${SWE_BAKED_SRC}/swesmith-0.0.7-py3-none-any.whl \
+    # Pin the exact transformers / huggingface_hub pair validated on GCR. R2E-Gym's
+    # pyproject asks for transformers>=4.47.1, but that pulls a huggingface_hub that
+    # removed HfFolder/is_offline_mode and breaks the agent imports. This downgrade is
+    # deliberate; pip prints a dependency-conflict warning that is safe to ignore.
+    && ${SWE_AGENT_VENV}/bin/pip install --no-cache-dir \
+         "transformers==4.45.2" "huggingface_hub==0.27.0" \
+    # docker SDK used by the agent runtime to talk to the remote dockerd.
+    && ${SWE_AGENT_VENV}/bin/pip install --no-cache-dir "docker==7.1.0" \
+    # Sanity: the import chain that previously broke must succeed.
+    && ${SWE_AGENT_VENV}/bin/python -c "import r2egym, litellm, docker, transformers; from huggingface_hub import create_repo; from transformers import AutoTokenizer; from swebench.harness.test_spec.test_spec import make_test_spec; print('swe-agent venv OK')"
+
+# ----------------------------------------------------------------------------
+# 3) (placeholder) SFT / RL venvs — added in a later pass once MI300X-validated.
+#    ENV SWE_SFT_VENV=/opt/venvs/swe-sft
+#    ENV SWE_RL_VENV=/opt/venvs/swe-rl
+# ----------------------------------------------------------------------------
+
+# Helpful defaults; the entrypoint script (cloned from the repo) overrides as needed.
+ENV HF_HOME=/scratch/hf_cache
+WORKDIR /workspace
+LABEL org.opencontainers.image.title="swe-master-serve-agent" \
+      org.opencontainers.image.description="ROCm/vLLM serving base + isolated R2E-Gym agent venv for SWE-Master rollouts on MI300X" \
+      org.opencontainers.image.source="https://github.com/M-Myron/SWE-Master"
+
+CMD ["/bin/bash"]

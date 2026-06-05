@@ -1,0 +1,62 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+develop-eggs/
+.installed.cfg
+pip-wheel-metadata/
+
+# ---- Virtual envs ----
+.venv/
+venv/
+env/
+ENV/
+**/.venv/
+.uv/
+
+# ---- Caches / runtime artifacts ----
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+R2E-Gym/test_spec_cache/
+**/test_spec_cache/
+*.log
+nohup.out
+
+# ---- Local secrets / credentials ----
+cred/*.url
+cred/*.sas
+cred/*.key
+cred/*token*
+*.pem
+*_token*.json
+token.json
+
+# ---- Editor / OS ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ---- Large data / model artifacts (keep examples, drop dumps) ----
+*.pt
+*.bin
+*.safetensors
+*.ckpt
+hf_cache/
+models/
+outputs/
+runs/
+results_*/
+traj_dir/
+*.tar
+*.tar.gz
+
+# Keep the small example datasets that ship with the repo
+!data_examples/**

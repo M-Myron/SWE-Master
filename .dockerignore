@@ -1,0 +1,29 @@
+# Build context excludes — keep the image build fast and small.
+# The image bakes ENV (deps) only; source is cloned fresh from GitHub at job time,
+# but we still COPY R2E-Gym + wheels here to resolve the agent venv deps.
+
+# Heavy / irrelevant
+.git/
+**/.venv/
+.venv/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+R2E-Gym/test_spec_cache/
+**/test_spec_cache/
+*.log
+
+# Don't ship local secrets into the image layers
+cred/
+token.json
+*.pem
+*_token*.json
+
+# Big subprojects not needed to BUILD the serving+agent image
+# (SFT/RL layers are added in a later pass; their code is cloned at job time)
+DeepSWE_RL/
+assets/
+outputs/
+runs/
+models/
+hf_cache/
