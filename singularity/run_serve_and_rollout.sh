@@ -76,10 +76,15 @@ command -v cloudflared docker socat ss jq >/dev/null || die "missing baked tools
   || die "agent venv broken"
 
 # ---------------- clone source ----------------
-hr "Clone SWE-Master source ($REPO_REF)"
+hr "Obtain SWE-Master source ($REPO_REF)"
 SRC="$WORKROOT/SWE-Master"
-git clone --depth 1 --branch "$REPO_REF" "$REPO_URL" "$SRC" \
-  || git clone "$REPO_URL" "$SRC" || die "git clone failed"
+if [ -n "${PRECLONED_SRC:-}" ] && [ -d "${PRECLONED_SRC}/R2E-Gym" ]; then
+  echo "reusing pre-cloned source at $PRECLONED_SRC"
+  SRC="$PRECLONED_SRC"
+else
+  git clone --depth 1 --branch "$REPO_REF" "$REPO_URL" "$SRC" \
+    || git clone "$REPO_URL" "$SRC" || die "git clone failed"
+fi
 cd "$SRC"
 git --no-pager log --oneline -1 || true
 # Re-point the editable agent install at this fresh checkout so our patched
