@@ -57,7 +57,14 @@ SCAFFOLD="${SCAFFOLD:-openhands}"
 API_KEY="${API_KEY:-not-needed}"
 PUBDIR="${PUBDIR:-/mnt/murongma/swe_rl}"
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
-WORKROOT="${WORKROOT:-/workspace/run_${STAMP}}"
+# /workspace is NOT writable in Singularity pods (non-root uid). Prefer /scratch.
+_pick_writable() {
+  for d in "$@"; do
+    if mkdir -p "$d" 2>/dev/null && [ -w "$d" ]; then echo "$d"; return 0; fi
+  done
+  echo "/tmp"; return 0
+}
+WORKROOT="${WORKROOT:-$(_pick_writable /scratch/swe_run_${STAMP} /mnt/murongma/swe_run_${STAMP} /tmp/swe_run_${STAMP})}"
 AGENT_PY=/opt/venvs/swe-agent/bin/python
 # Default dataset: the single-instance public-docker demo shipped in the repo.
 DATASET="${DATASET:-data_examples/inference_data/swe_bench_verified/test_swe_bench_verified_full_ip_demo_pubdocker.json}"

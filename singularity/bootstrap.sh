@@ -13,10 +13,20 @@ set -uo pipefail
 
 REPO_URL="${REPO_URL:-https://github.com/M-Myron/SWE-Master.git}"
 REPO_REF="${REPO_REF:-main}"
-BOOT_DIR="${BOOT_DIR:-/workspace/swe_boot}"
+
+# Pick a writable base dir. Singularity pods run as a non-root uid and /workspace
+# is NOT writable; /scratch (fast local, ~28TB) is. Fall back to blob mount / /tmp.
+pick_writable() {
+  for d in "$@"; do
+    if mkdir -p "$d" 2>/dev/null && [ -w "$d" ]; then echo "$d"; return 0; fi
+  done
+  echo "/tmp"; return 0
+}
+BOOT_DIR="${BOOT_DIR:-$(pick_writable /scratch/swe_boot /mnt/murongma/swe_boot /tmp/swe_boot)}"
 
 echo "==================== bootstrap ===================="
 echo "REPO_URL=$REPO_URL  REPO_REF=$REPO_REF"
+echo "BOOT_DIR=$BOOT_DIR"
 hostname; date -u
 
 rm -rf "$BOOT_DIR"; mkdir -p "$BOOT_DIR"
