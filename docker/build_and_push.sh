@@ -13,7 +13,7 @@ set -euo pipefail
 ACTION="${1:-build}"
 REGISTRY="${REGISTRY:-msraairgroup.azurecr.io}"
 IMAGE_NAME="${IMAGE_NAME:-swe-master-serve-agent}"
-IMAGE_TAG="${IMAGE_TAG:-rocm7.2-vllm0.18-agent-v1}"
+IMAGE_TAG="${IMAGE_TAG:-rocm7.2-vllm0.18-agent-v2}"
 FULL="${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

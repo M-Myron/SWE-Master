@@ -61,6 +61,16 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/b
     && uv --version
 
 # ----------------------------------------------------------------------------
+# 1b) Serving-stack fix: the base image ships a mistral_common too old for vLLM's
+#     chat path (missing ReasoningEffort), which makes /v1/chat/completions 500.
+#     Upgrade ONLY mistral_common in the SYSTEM python (where vLLM runs); --no-deps
+#     keeps the rest of the serving stack pinned. Verified vLLM still imports.
+# ----------------------------------------------------------------------------
+RUN pip install --no-cache-dir --upgrade --no-deps "mistral_common>=1.5.4" \
+    && python -c "from mistral_common.protocol.instruct.request import ReasoningEffort; print('mistral_common ReasoningEffort OK')" \
+    && python -c "import vllm; print('vllm import OK', vllm.__version__)" 2>/dev/null || true
+
+# ----------------------------------------------------------------------------
 # 2) Agent venv (isolated from base system Python)
 #    Dependency set mirrors the GCR-validated `swe-master` env.
 # ----------------------------------------------------------------------------

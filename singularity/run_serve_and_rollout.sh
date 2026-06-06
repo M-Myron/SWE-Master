@@ -106,6 +106,19 @@ git --no-pager log --oneline -1 || true
 hr "Start vLLM ($MODEL, TP=$TP_SIZE)"
 export HF_HOME="${HF_HOME:-/scratch/hf_cache}"; mkdir -p "$HF_HOME"
 export TRANSFORMERS_CACHE="$HF_HOME" HF_HUB_CACHE="$HF_HOME/hub" HF_HUB_ENABLE_HF_TRANSFER=0
+
+# Safety net: ensure the serving python has a mistral_common new enough for vLLM's
+# chat path (needs ReasoningEffort). The image bakes this, but if an older image
+# tag is used, patch at runtime so /v1/chat/completions doesn't 500.
+if ! python -c "from mistral_common.protocol.instruct.request import ReasoningEffort" 2>/dev/null; then
+  echo "patching mistral_common at runtime (image's is too old)..."
+  pip install --user --upgrade --no-deps "mistral_common>=1.5.4" 2>&1 | tail -2 || true
+  python -c "from mistral_common.protocol.instruct.request import ReasoningEffort; print('mistral_common patched OK')" \
+    || echo "WARNING: mistral_common patch failed — chat completions may 500"
+else
+  echo "mistral_common OK (ReasoningEffort importable)"
+fi
+
 nohup python -m vllm.entrypoints.openai.api_server \
     --model "$MODEL" --host 0.0.0.0 --port "$PORT" \
     --max-model-len "$MAX_LEN" --tensor-parallel-size "$TP_SIZE" \
