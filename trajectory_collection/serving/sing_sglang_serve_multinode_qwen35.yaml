@@ -1,0 +1,97 @@
+description: Multi-node SGLang — N MI300X nodes each serve a full TP=8 Qwen3.5-397B-A17B replica; rank-0 runs the in-job sglang-router (fans out over all replicas over internal eth0) and exposes ONE Cloudflare tunnel. Rollout points at the single router URL for ~N x throughput. Set jobs[0].sku to Nx192G8-MI300X for N replicas.
+#
+# Qwen3.5-397B-A17B vs Qwen3-Coder-480B (per official SGLang AMD MI300X docs):
+#   - hybrid Gated-DeltaNet + sparse MoE (397B total / 17B active); thinking ON by default
+#   - REQUIRED on AMD MI:  --mamba-scheduler-strategy no_buffer  (V1; V2 extra_buffer is NVIDIA-only)
+#   - --reasoning-parser qwen3   (separate <think> into reasoning_content)
+#   - --tool-call-parser qwen3_coder  (same parser as Qwen3-Coder)
+#   - --mem-fraction-static 0.8  (recommended; down from 0.9)
+#   - --attention-backend triton + SGLANG_USE_AITER=1  (GatedDeltaNet + full attn use Triton on ROCm)
+#   - MI300X 192GB BF16 fits at tp=8 on ONE node.
+# Our SGLang 0.5.11 image already ships qwen3_5.py (arch supported) — no image change needed.
+
+# Azure/Singularity infrastructure identifiers — parameterized via env vars.
+# amlt substitutes each $VAR from the shell environment if set, else from the
+# env_defaults below. Export any of these to retarget a different tenant/workspace
+# without editing this file (e.g. `export SING_WORKSPACE=...; amlt run ...`).
+env_defaults:
+  SING_TARGET: omai-aue-vc
+  SING_WORKSPACE: msraairwsws
+  SING_REGISTRY: msraairgroup.azurecr.io
+  SING_BLOB_ACCOUNT: zhibinmain
+  SING_BLOB_CONTAINER: murongma
+  SING_JOB_UAI: /subscriptions/762905fc-41fb-4bfb-8e41-478b86cb99ab/resourceGroups/system_yeyun/providers/Microsoft.ManagedIdentity/userAssignedIdentities/msraairwsid
+
+target:
+  service: sing
+  name: $SING_TARGET
+  workspace_name: $SING_WORKSPACE
+
+environment:
+  image: sglang:v0.5.11-rocm700-mi30x-patched-nonroot
+  registry: $SING_REGISTRY
+  setup:
+    - python3 -c "import importlib.metadata as m; print('sglang', m.version('sglang'))"
+    - python3 -c "import sglang_router; print('sglang_router', sglang_router.__version__)"
+    - ls /sgl-workspace/sglang/python/sglang/srt/models/qwen3_5.py
+    - which curl python3 ip
+
+code:
+  local_dir: $CONFIG_DIR/
+  remote_dir: murongma/dind_test
+
+storage:
+  data:
+    storage_account_name: $SING_BLOB_ACCOUNT
+    container_name: $SING_BLOB_CONTAINER
+    mount_dir: /mnt/murongma
+
+jobs:
+- name: sglang_router_qwen35_397b
+  # N nodes, each a full TP=8 replica. 3x = 3 replicas (~3x throughput).
+  sku: 8x192G8-MI300X
+  sla_tier: Premium
+  priority: High
+  mpi: False
+  process_count_per_node: 1
+  identity: managed
+  command:
+    - export MODEL="Qwen/Qwen3.5-397B-A17B"
+    - export PORT=8000
+    - export ROUTER_PORT=30000
+    - export TP_SIZE=8
+    - export MAX_LEN=131072            # >=128K to preserve thinking; Qwen3.5 default is 262144
+    - export MEM_FRAC=0.7              # GPU-HBM headroom: weights=92.8GB/GPU; 0.8 left only ~27GB runtime
+                                       # and long reasoning decode OOM'd (HSA_STATUS_ERROR_OUT_OF_RESOURCES).
+                                       # 0.7 -> ~47GB runtime headroom. KV pool ~41GB still ample (hybrid model).
+    - export TOOL_PARSER=qwen3_coder
+    - export REASONING_PARSER=qwen3    # thinking ON by default -> separate into reasoning_content
+    - export MAMBA_STRATEGY=no_buffer  # REQUIRED on AMD MI (hybrid Gated-DeltaNet)
+    - export MOE_RUNNER_BACKEND=triton # validated-good on MI300X (auto/aiter CK can garble)
+    - export SGLANG_USE_AITER=1        # AMD Day-0 instruction for Qwen3.5 on Instinct (MI300X/325X/355X):
+                                       # enables aiter kernels for GatedDeltaNet + full-attn paths.
+                                       # Pair with --attention-backend triton (set above). NOTE: this does
+                                       # NOT silence aiter's untuned-GEMM 'torch solution' log flood
+                                       # (that's a separate tuned_gemm CSV-miss issue; see guide §6 #12).
+    - export POLICY=cache_aware
+    - export MAX_RUNNING_REQ=48       # per-replica concurrent cap (protects the single-threaded detokenizer)
+    - export BALANCE_ABS=8            # cache_aware load-balance trigger. MUST be < client max_workers (we run 48)
+                                       # or balancing NEVER fires (default 64) and one prefix-owning replica gets
+                                       # ALL traffic (the v5 melt). Scale ~ max_workers/replicas: 8 nodes x 48 workers
+                                       # => ~6 in-flight/replica, so 8 keeps every node busy & evenly spread.
+    - export BALANCE_REL=1.3          # divert to least-loaded once a replica is >1.3x the min and >BALANCE_ABS in-flight
+    - export CACHE_THRESHOLD=0.5      # still prefer the cache-warm replica below the load cap (preserves per-rollout KV reuse)
+    - export NODE_COUNT=$${AZUREML_NODE_COUNT:=1}
+    - export NODE_RANK=$${NODE_RANK:=0}
+    - export MASTER_ADDR=$${MASTER_ADDR:=localhost}
+    - echo "NODE_COUNT=$$NODE_COUNT NODE_RANK=$$NODE_RANK MASTER_ADDR=$$MASTER_ADDR"
+    - chmod +x sing_sglang_serve_multinode.sh
+    - bash sing_sglang_serve_multinode.sh
+  submit_args:
+    env:
+      {
+        "NCCL_DEBUG": "WARN",
+        "_AZUREML_SINGULARITY_JOB_UAI": "$SING_JOB_UAI"
+      }
+  tags:
+  - Project_Name:Sing_SGLang_Router_Qwen35_397B

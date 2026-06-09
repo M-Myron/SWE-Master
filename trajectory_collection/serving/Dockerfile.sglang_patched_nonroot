@@ -1,0 +1,56 @@
+# Make the colleague's patched SGLang ROCm image runnable as NON-ROOT (Singularity uid 9000).
+# Bakes in ALL known non-root fixes so the serve script needs no per-issue workarounds:
+#   1. aiter hardcodes its tuned-GEMM cache to /tmp/aiter_configs (no env override) and
+#      writes a .lock there at `import sglang`. Base bakes it root-owned -> uid 9000 crash.
+#      Remove it so aiter recreates it fresh (user-owned) at runtime; source CSVs under
+#      /sgl-workspace/aiter/aiter/configs remain (re-merged in ms, no GPU re-tune).
+#   2. During CUDA-graph capture, torch inductor's normal flow shells out to `nvcc --version`
+#      (ROCm reports cuda.is_available()==True). Image nvcc is root-mode 0700, and torch only
+#      catches FileNotFoundError/CalledProcessError (NOT PermissionError) -> crash after weights
+#      fully load. Make nvcc world-exec so the probe succeeds (preserves functionality).
+#   3. HOME=/ is read-only for uid 9000; triton/inductor/HF caches default to $HOME/.cache.
+#      Provide writable HOME + cache dirs under /tmp (the only writable mount).
+ARG BASE=msraairgroup.azurecr.io/sglang:v0.5.11-rocm700-mi30x-patched
+FROM ${BASE}
+
+# 1) aiter config cache (recreated user-owned at runtime)
+RUN rm -rf /tmp/aiter_configs
+
+# 2) make every nvcc on PATH world-executable so torch's debug-repro subprocess
+#    doesn't hit PermissionError under uid 9000 (no-op if nvcc absent)
+RUN for n in $(bash -lc 'command -v nvcc' 2>/dev/null) /usr/local/cuda/bin/nvcc /opt/rocm/bin/nvcc; do \
+      [ -e "$n" ] && chmod 0755 "$n" || true; \
+    done; true
+
+# 3) writable HOME + framework JIT caches under /tmp
+RUN mkdir -p /tmp/home/.cache /tmp/triton_cache /tmp/torchinductor_cache \
+ && chmod -R 1777 /tmp/home /tmp/triton_cache /tmp/torchinductor_cache
+ENV HOME=/tmp/home \
+    XDG_CACHE_HOME=/tmp/home/.cache \
+    TRITON_CACHE_DIR=/tmp/triton_cache \
+    TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor_cache
+
+# 4) SGLang @torch.compiles small helpers (e.g. get_masked_input_and_mask in
+#    vocab_parallel_embedding) during CUDA-graph capture, even without
+#    --enable-torch-compile. Under uid 9000 the inductor path is fragile (it
+#    shells to nvcc for a debug-repro string, needs a C++/hip compiler, writes
+#    caches). Disable torch.compile globally as a BAKED ENV so it is inherited
+#    by every spawned TP-worker subprocess (a runtime export does NOT reliably
+#    reach them). CUDA graphs are SGLang's own CudaGraphRunner (independent of
+#    torch.compile) and STAY enabled; perf cost is negligible since we never
+#    pass --enable-torch-compile.
+ENV TORCH_COMPILE_DISABLE=1
+
+# 5) aiter JIT-compiles fused-MoE CK kernels at RUNTIME. Its build vs import
+#    dirs must agree (aiter/jit/core.py): the default package dir
+#    /sgl-workspace/aiter/aiter/jit is root-owned/read-only for uid 9000, so
+#    get_user_jit_dir() copies to ~/.aiter/jit and builds the .so THERE — but
+#    without AITER_JIT_DIR the import branch still does
+#    importlib.import_module("aiter.jit.<md>") from the read-only package dir →
+#    ModuleNotFoundError after a ~190s build (the v5 crash at cuda-graph capture).
+#    Setting AITER_JIT_DIR makes BOTH branches use this writable dir (it is also
+#    inserted into sys.path) so build and import are consistent. Pre-seed it with
+#    the JIT tree at build time and make it world-writable so any uid can build.
+ENV AITER_JIT_DIR=/tmp/aiter_jit
+RUN cp -r /sgl-workspace/aiter/aiter/jit /tmp/aiter_jit \
+ && chmod -R 1777 /tmp/aiter_jit
