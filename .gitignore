@@ -58,5 +58,11 @@ traj_dir/
 *.tar
 *.tar.gz
 
+# ---- Trajectory collection runtime output (large dumps, not source) ----
+collect_runs/
+**/collect_runs/
+# Singularity job-output bundles (logs/zip pulled from the portal)
+singularity/job_logs/
+
 # Keep the small example datasets that ship with the repo
 !data_examples/**
