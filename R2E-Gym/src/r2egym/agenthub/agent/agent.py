@@ -113,6 +113,9 @@ class Agent:
         
         self.max_retries = self.other_args.get("max_retries", 3)
         self.llm_timeout = self.other_args.get("timeout", 300)
+        # Exponential backoff between LLM retries (increasing wait, capped).
+        self.retry_base_wait = self.other_args.get("retry_base_wait", 5)
+        self.retry_max_wait = self.other_args.get("retry_max_wait", 60)
         self.contenxt_id = ""
 
 
@@ -199,11 +202,15 @@ class Agent:
             except Exception as e:
                 self.logger.error(f"LLM query failed @ {retries}: {e}")
                 retries += 1
-                time.sleep(10)
-                if "RateLimitError" in str(e):
-                    time.sleep(20)
                 if retries >= self.max_retries:
                     raise e
+                # exponential backoff (increasing wait between retries), capped
+                wait = min(self.retry_base_wait * (2 ** (retries - 1)), self.retry_max_wait)
+                if "RateLimitError" in str(e):
+                    wait = min(wait * 2, self.retry_max_wait)
+                self.logger.warning(
+                    f"Retrying LLM query in {wait}s (attempt {retries}/{self.max_retries})")
+                time.sleep(wait)
 
         exec_time = time.time() - start_time
         return response, exec_time
@@ -282,11 +289,15 @@ class Agent:
             except Exception as e:
                 self.logger.error(f"LLM query failed @ {retries}: {e}")
                 retries += 1
-                time.sleep(10)
-                if "RateLimitError" in str(e):
-                    time.sleep(20)
                 if retries >= self.max_retries:
                     raise e
+                # exponential backoff (increasing wait between retries), capped
+                wait = min(self.retry_base_wait * (2 ** (retries - 1)), self.retry_max_wait)
+                if "RateLimitError" in str(e):
+                    wait = min(wait * 2, self.retry_max_wait)
+                self.logger.warning(
+                    f"Retrying LLM query in {wait}s (attempt {retries}/{self.max_retries})")
+                time.sleep(wait)
 
         exec_time = time.time() - start_time
         return response, exec_time
@@ -422,6 +433,7 @@ class Agent:
             or "o4" in self.llm_name
             or "qwen3-max" in self.llm_name
             or "qwen3-coder" in self.llm_name.lower()
+            or "qwen3.5" in self.llm_name.lower()
         )
         self.use_fn_calling = use_fn_calling and support_fn_calling
         self.logger.warning(f"Using fn calling: {self.use_fn_calling}")
@@ -535,7 +547,7 @@ class Agent:
 
             # Query the LLM for the next action
             messages = copy.deepcopy(self.history)
-            model_gen_max_num= 3
+            model_gen_max_num = self.other_args.get("model_gen_max_num", 3)
             model_gen_finished_flag = False
             for model_gen_try in range(model_gen_max_num):
                 try:
@@ -543,12 +555,22 @@ class Agent:
                     model_gen_finished_flag = True
                     break
                 except Exception as e:
-                    self.logger.error(f"Error querying LLM: {e}. Attempt {model_gen_try+1} failed.")
+                    self.logger.error(f"Error querying LLM: {e}. Attempt {model_gen_try+1}/{model_gen_max_num} failed.")
                     self.logger.error(f"Traceback: {traceback.format_exc()}")
+                    if model_gen_try < model_gen_max_num - 1:
+                        # increasing wait between outer generation retries
+                        # (on top of model_query's own internal backoff)
+                        outer_wait = min(self.retry_base_wait * (2 ** model_gen_try), self.retry_max_wait)
+                        self.logger.warning(f"Retrying generation in {outer_wait}s")
+                        time.sleep(outer_wait)
 
             if not model_gen_finished_flag:
                 done = True
                 exit_reason = "llm_query_error"
+                self.logger.error(
+                    f"LLM query failed after {model_gen_max_num} generation attempts "
+                    f"(each with up to {self.max_retries} internal retries). Marking trajectory "
+                    f"exit_reason=llm_query_error (unfinished; reprocessable on resume).")
                 break
 
             # Process token usage stats
@@ -580,7 +602,10 @@ class Agent:
             
             # Select appropriate parser for the response
             if self.use_fn_calling:
-                if "kimi" in self.llm_name:
+                if getattr(response.choices[0].message, "reasoning_content", None):
+                    # Thinking-mode models (kimi, qwen3.5, ...) return reasoning in
+                    # `reasoning_content` alongside tool_calls; custom_parser only reads
+                    # `content` and would DROP the reasoning -> empty <think>. Capture it.
                     thought, action = self.reasoning_parser(response)
                 else:
                     thought, action = self.custom_parser(response)

@@ -832,19 +832,23 @@ class DockerRuntime(ExecutionEnvironment):
 
     def setup_env_swebench(self):
         try:
-            # Public swebench/sweb.eval.* images don't ship /run_tests.sh; build from test_spec.eval_script.
+            # Public swebench/sweb.eval.* images don't ship /run_tests.sh.
+            # Build it from the test_spec we computed via make_test_spec(self.ds)
+            # (mirrors what setup_env_swegym does).
             try:
                 test_command = self.test_spec.eval_script
-                self.logger.info(f"SWE-bench-verified writing /run_tests.sh, len={len(test_command) if test_command else 0}")
+                self.logger.info(f"SWE-bench-verified Writing eval_script_content to /run_tests.sh")
                 with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.sh') as temp_file:
                     temp_file.write(test_command)
                     temp_file.flush()
                     temp_file_path = temp_file.name
                 self.copy_to_container(temp_file_path, "/run_tests.sh")
                 os.unlink(temp_file_path)
-                self.logger.info("SWE-bench-verified /run_tests.sh copied OK")
             except Exception as _e_eval:
-                self.logger.warning(f"SWE-bench-verified could not write /run_tests.sh from test_spec: {repr(_e_eval)}")
+                self.logger.warning(
+                    f"SWE-bench-verified could not write /run_tests.sh from test_spec ({_e_eval}); "
+                    f"falling back to in-image script if present."
+                )
 
             # make the run_tests.sh executable
             self.run("chmod +x /run_tests.sh")
