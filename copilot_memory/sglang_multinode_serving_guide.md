@@ -467,6 +467,51 @@ These are in the order we hit them. Every one is now fixed in the image or scrip
     it is **not** a fix for landmine #12 (the GEMM-log flood comes from aiter's `tuned_gemm`, which
     is active with or without this flag). Low-risk correctness/perf alignment with AMD guidance.
 
+14. **Detokenizer "Health check failed … last 20 seconds" is OFTEN a FALSE POSITIVE, not a real
+    hang — raise `SGLANG_HEALTH_CHECK_TIMEOUT`.** Follow-up to #12. At 8-node scale (`8node_v6`) the
+    `Health check failed. Server couldn't get a response from detokenizer for last 20 seconds` event
+    recurred on **many** ranks (tally over one run: rank5×4, rank3/4/6×2, rank1/7×1, rank0/2×0), i.e.
+    **NOT** unique to rank0 — so the #12 "rank0 runs router+tunnel" contention story is only part of
+    it. Reading the actual crash logs (`sglang_logs/<exp>_rank<N>_<stamp>.CRASH.sglang.log`) the
+    freeze happened at **LOW load**: the decode batch immediately before the heartbeat froze showed
+    `full token usage: 0.09` (9% KV), `#running-req: 5`, `#queue-req: 0`, `gen throughput 296 tok/s`,
+    **no traceback, no HIP/HSA, no abort**. The heartbeat timestamp simply stops advancing.
+    → **Web research (sgl-project/sglang #22511 + #26482 + #10856, all OPEN as of 2026-06):** the
+    error is TWO distinct failures sharing one message. **(A) FALSE-POSITIVE health check (our case):**
+    SGLang's `/health` decides health from `tokenizer_manager.last_receive_tstamp` — *"did any batch
+    output arrive in the last N s"* — **NOT** process liveness or GPU activity. During a long-context
+    **chunked prefill**, no batch output flows to the tokenizer for a while, so the timestamp goes
+    stale and `/health` 503s **even though the replica is perfectly healthy and computing**. Maintainer
+    RCA + code walk in #22511 confirms this; the timeout is literally `SGLANG_HEALTH_CHECK_TIMEOUT`
+    (default **20 s**). We run `--context-length 131072`, so a multi-chunk prefill easily exceeds 20 s
+    → our supervisor hang-detector (#12, `HEALTH_FAIL_THRESHOLD`) then hard-restarts a **healthy**
+    replica = wasted ~4–5 min out of rotation, not a real crash. **(B) GENUINE detokenizer wedge:**
+    strongly correlated with `--enable-hierarchical-cache` (hicache), DP-attention, EAGLE/spec-decode,
+    or PD-disaggregation (sometimes a slow GPU-mem leak). Our `server_args` show
+    `enable_hierarchical_cache=False`, `enable_dp_attention=False`, `speculative_algorithm=None`,
+    `disable_overlap_schedule=True` → **none** of the variant-B aggravators, so ours is variant A.
+    → **"Just use a newer image" is NOT a reliable fix:** #22511/#26482 reproduce on **0.5.11 AND
+    0.5.12**, including **Qwen3.5 explicitly** ("same with Qwen3.5 on 16*A80 v0.5.12"); a
+    downgrade-to-0.5.3 "fix" was contradicted by others. Don't burn a 13-min cold-start chasing it.
+    → **FIX APPLIED (serve script, `sing_sglang_serve_multinode.sh`):** export
+    `SGLANG_HEALTH_CHECK_TIMEOUT="${SGLANG_HEALTH_CHECK_TIMEOUT:-120}"` **before** `launch_sglang()`
+    (so SGLang's TP-worker subprocesses inherit it — a runtime export after launch does NOT reach
+    them). Raises the false-positive window 20→120 s; a long prefill is no longer mistaken for a wedge.
+    Kept `HEALTH_FAIL_THRESHOLD=12` as the genuine-hang safety net (variant B still gets restarted).
+    Takes effect on the **next** serve submit only (a running job keeps the old value).
+    → **It doubles as a DIAGNOSTIC:** if flapping/`CRASH.sglang.log` files stop appearing with the
+    120 s window, it was the false positive (you were killing good replicas); if a replica still wedges
+    for minutes *with* 120 s, that's a genuine variant-B hang and *then* a newer image is justified.
+    → **VALIDATION (4node_v1, carries the fix):** under real rollout load (~12 in-flight/replica),
+    **0 detokenizer `CRASH.sglang.log` files** and the 30 trajectories collected right after the
+    switch were the cleanest batch yet — **100% thought-rate (100% min), 100% tool-call, 0 degenerate,
+    0 `abs_step_limit`, 60% solved, all patches well-formed.** The robustness win is what motivated
+    rebuilding the 8-node as `8node_v7` (also carrying the fix).
+    → **Diagnosis recipe:** `../blob_sas.sh list "sglang_logs/" | grep <exp> | grep CRASH` (each CRASH
+    file = one stall-triggered restart); `cat` a small/recent one and `tail` → look for
+    `last_heartbeat time:` FROZEN while `tic start time:` advances. `status.txt` = the restart timeline.
+    Note: `node_<rank>.url` often reads EMPTY via azcopy (blobfuse cache staleness) — use `status.txt`.
+
 Other facts worth knowing:
 - SGLang tool parser for Qwen3-Coder **and Qwen3.5** is **`qwen3_coder`** (vLLM's was `qwen3_xml`).
   The bundled HF chat template (no `--chat-template` override → `chat_template=None`) renders the

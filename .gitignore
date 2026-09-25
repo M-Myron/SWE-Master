@@ -61,6 +61,8 @@ traj_dir/
 # ---- Trajectory collection runtime output (large dumps, not source) ----
 collect_runs/
 **/collect_runs/
+.instance_cache/
+**/.instance_cache/
 # Singularity job-output bundles (logs/zip pulled from the portal)
 singularity/job_logs/
 

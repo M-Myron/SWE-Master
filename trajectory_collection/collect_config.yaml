@@ -1,0 +1,67 @@
+# =============================================================================
+# Unified rollout-collection config.
+#
+# ONE place to define: the serving endpoint(s), the model, the rollout settings,
+# and per-dataset overrides. The dataset *catalog* lives in build_dataset.py's
+# REGISTRY (add a dataset there); this file says HOW to roll each one out.
+#
+# Run:   ./collect.sh <dataset>              # uses the settings below
+#        ./collect.sh swegym --max_workers 32   # any field is overridable on CLI
+#
+# Precedence (low -> high):  defaults (here)  <  datasets.<name> (here)  <  CLI flag
+#
+# Output layout (settings are reflected in the path, so different settings on the
+# SAME dataset never collide):
+#   <out_root>/<dataset>/<model>_iter<max_steps>_t<temperature>[_nofc]/
+#       trajectories.jsonl     # one rollout+reward record per line (append/resume)
+#       config.json            # the exact resolved settings for this run
+#       progress.json          # live counters
+#       run.log                # OVERALL process log (driver-level)
+#       logs/<iid>.log         # DETAILED per-instance log (incl. errors), one file each
+# =============================================================================
+
+# ---- serving (specify the URL directly — no blob auto-detection) ------------
+# This is the OpenAI-compatible router base URL (the sglang router tunnel).
+# Leave `url:` null to fall back to reading it from blob via `router_json`.
+url: https://declaration-accidents-together-disabled.trycloudflare.com
+router_json: null            # blob path, used only when url is null
+model: Qwen/Qwen3.5-397B-A17B
+
+# ---- rollout settings (these define the run-dir name) -----------------------
+max_steps: 100               # "max iter number" — agent step cap per instance
+temperature: 0.6
+max_tokens: 131072
+use_fn_calling: true
+
+# ---- scheduler --------------------------------------------------------------
+max_workers: 48              # max concurrent rollouts (streaming concurrency cap)
+pull_workers: 8              # max concurrent on-demand docker pulls
+instance_timeout: 7200       # hard wall-clock cap (s) per rollout; on hit the rollout's
+                             # process group is killed so a hung rollout frees its slot
+                             # instead of starving the pool (prevents the teardown-deadlock stall)
+out_root: collect_runs
+
+# ---- behavior flags ---------------------------------------------------------
+keep_images: false           # keep docker images after an image's instances finish (debug)
+retry_failed: true           # quarantine llm_query_error/degenerate trajectories for retry
+orphan_cleanup: true         # preflight: remove leftover sweb.eval containers.
+                             # SET false (or pass --no_orphan_cleanup) when a 2nd
+                             # collection runs on the same docker host.
+
+# ---- per-dataset overrides (optional) ---------------------------------------
+# Any key above can be overridden per dataset. Datasets not listed here still
+# work — they just use the defaults. Add a dataset to build_dataset.py REGISTRY
+# and (optionally) tune it here.
+datasets:
+  swegym:
+    # collected on the 8-node router
+    url: https://declaration-accidents-together-disabled.trycloudflare.com
+  swesmith:
+    # 4-node v3 router (replaces the FAILED 4node_v2). Two ways to point here:
+    #   url         — explicit pin (wins when non-null).
+    #   router_json — auto-resolve: when url is null, resolve_url reads the LIVE
+    #                 tunnel URL from this blob each run (survives tunnel restarts).
+    # url is null while v3 cold-starts (URL not yet published); it'll auto-resolve
+    # from router_json, and can be pinned here once the endpoint is live.
+    url: null
+    router_json: sglang_workers/sing_sglang_router_qwen35_397b_4node_v3_router.json

@@ -304,6 +304,7 @@ without re-checking:
 | **fn-calling silently off** | every step "forgot to use a function call"; `Using fn calling: False` | model id allow-list in R2E-Gym `agent.py` includes `qwen3.5` (collector side) |
 | **garbled MoE output** | fluent-but-unrelated text, `tool_calls=null` | `MOE_RUNNER_BACKEND=triton` (YAML) |
 | **rank0 detokenizer hang** | `Health check failed … detokenizer … 20s`; replica alive but unhealthy | `nice` router/tunnel + removed `tail -f` + hang-detector (script) |
+| **detokenizer health-check FALSE POSITIVE** | same `… detokenizer … 20s` on *any* rank, at low load, no traceback — long 128K chunked prefill starves the `last_receive_tstamp` health signal (sglang#22511/#26482, open on 0.5.11/0.5.12 incl. Qwen3.5). Supervisor then restarts a *healthy* replica | `SGLANG_HEALTH_CHECK_TIMEOUT=120` exported before launch (script); raises the 20s window. Newer image is NOT a reliable fix |
 | **v4 kill-loop** | hang-detector killed a still-warming replica right after READY | `wait_sglang_ready` gates on `/health` (script) |
 | **5 non-root crashes** | aiter lock / nvcc / cache / inductor / aiter-JIT `PermissionError`/`ModuleNotFoundError` | baked into the Dockerfile |
 

@@ -41,6 +41,13 @@ BALANCE_REL="${BALANCE_REL:-1.3}"                     #   CRITICAL: default 64 >
                                                      #   reqs funneled onto ONE prefix-owning replica (rank0 starved to ~2, rank1/2 melted at ~50).
 MAX_RESTARTS="${MAX_RESTARTS:-50}"                    # supervisor: max auto-restarts per component (sglang/router/tunnel)
 HEALTH_FAIL_THRESHOLD="${HEALTH_FAIL_THRESHOLD:-12}"  # consecutive local /health failures (~3min @15s loop) => replica HUNG (e.g. SGLang detokenizer stall) => restart
+# SGLang's /health is a FALSE-POSITIVE trap: it 503s if no batch output reached the tokenizer
+# within this many seconds, even when the replica is healthy but busy in a long-context chunked
+# prefill (we run up to 128K ctx). Default 20s -> our supervisor then hard-restarts a HEALTHY
+# replica. Raise the window so a long prefill is not mistaken for a detokenizer wedge.
+# See sgl-project/sglang#22511 / #26482 (open on 0.5.11/0.5.12, incl. Qwen3.5).
+SGLANG_HEALTH_CHECK_TIMEOUT="${SGLANG_HEALTH_CHECK_TIMEOUT:-120}"
+export SGLANG_HEALTH_CHECK_TIMEOUT
 LOGSYNC_INTERVAL="${LOGSYNC_INTERVAL:-60}"            # blob log-sync period (was 20s; lighter on slow blobfuse + tmpfs)
 LOG_CAP_MB="${LOG_CAP_MB:-200}"                       # truncate /tmp/sglang.log past this MB (tmpfs=RAM; keep small)
 METRICS_INTERVAL="${METRICS_INTERVAL:-20}"            # tiny per-replica metrics JSON publish period (for the dev-box monitor)

@@ -603,9 +603,6 @@ class Agent:
             # Select appropriate parser for the response
             if self.use_fn_calling:
                 if getattr(response.choices[0].message, "reasoning_content", None):
-                    # Thinking-mode models (kimi, qwen3.5, ...) return reasoning in
-                    # `reasoning_content` alongside tool_calls; custom_parser only reads
-                    # `content` and would DROP the reasoning -> empty <think>. Capture it.
                     thought, action = self.reasoning_parser(response)
                 else:
                     thought, action = self.custom_parser(response)

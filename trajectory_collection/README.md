@@ -89,7 +89,24 @@ These must be true on the box you run from (the GCR dev box):
    **submit or monitor** the serving job itself, see [`serving/`](serving/README.md).
 2. **Conda env `swe-master`** exists with R2E-Gym installed. Default interpreter:
    `/home/v-murongma/miniconda3/envs/swe-master/bin/python` (override with
-   `SWE_MASTER_PY`).
+   `SWE_MASTER_PY`). To (re)create it on a fresh box — run from the repo root, where
+   `R2E-Gym/` and the three wheels sit beside `trajectory_collection/`:
+   ```bash
+   conda create -n swe-master python=3.12 -y
+   conda activate swe-master
+   cd /path/to/SWE-Master                 # repo root (R2E-Gym must be a sibling of trajectory_collection)
+   pip install -e R2E-Gym                 # editable harness — pulls litellm, docker, datasets, ...
+   pip install swebench_fork_swegym-2.0.13-py3-none-any.whl \
+               swebench_fork_swerebench-4.0.3-py3-none-any.whl \
+               swesmith-0.0.7-py3-none-any.whl
+   pip install pyyaml                      # collect.py reads the YAML config
+   python -c "import r2egym, swebench, litellm, yaml; print('OK', swebench.__version__)"  # expect 3.0.2
+   ```
+   Key pins that must end up installed: `swebench==3.0.2`, `litellm==1.86.1`,
+   `docker==7.1.0`, `datasets==2.19.0`, `transformers==4.45.2`, `tiktoken==0.13.0`.
+   Exact snapshot for reference: [`env/swe-master.pip-freeze.txt`](env/swe-master.pip-freeze.txt)
+   (install from the moved location using the recipe above — the `-e git+...` / `file://`
+   lines in the freeze point at old paths).
 3. **Docker daemon** running locally (rootless dockerd on `/var/run/docker.sock`),
    data root on `/datadisk` (~621 GB free). The driver auto-starts a `socat`
    bridge `127.0.0.1:2375 -> /var/run/docker.sock` (R2E-Gym hardcodes that TCP
@@ -97,6 +114,12 @@ These must be true on the box you run from (the GCR dev box):
 4. **`azcopy`** on PATH and the blob SAS cred at `../cred/zhibinmain_murongma_sas.url`
    (used by `blob_sas.sh` to resolve the router URL). Not needed if you pass
    `URL=...` yourself.
+5. **`GITHUB_TOKEN`** exported — **required for `swesmith`** (optional for the others).
+   swesmith's Go/non-Python reward path verifies the mirror repo via the GitHub REST
+   API, which is capped at **60 req/hr** unauthenticated and gets rate-limited within
+   seconds (failing those instances with `Mirror clone repo must be created first`).
+   A **scope-less** classic PAT (the mirrors are public) raises the limit to 5000/hr:
+   `export GITHUB_TOKEN=ghp_…` before launching. The driver warns at preflight if unset.
 
 The driver runs a preflight at startup and aborts with a clear `FATAL:` message if
 the router is unhealthy or docker TCP is unreachable.
@@ -451,6 +474,7 @@ grep -ac "trycloudflare" collect_runs/$EXP/run.log     # should be > 0
 | `FATAL: docker TCP 127.0.0.1:2375 not reachable` | dockerd / socat not up | ensure `dockerd` is running; the driver auto-starts socat but the daemon must exist |
 | `llm base url: http://localhost:8000/v1` + `'OPENAI_API_KEY'` + `Can not write for Docker image` | the rollout subprocess didn't get the router env | already fixed (driver passes `env=` to the subprocess); if you forked the code, ensure `run_wave` keeps `env=env` |
 | `Using fn calling: False` then `forgot to use a function call` every step | model id not in R2E-Gym's fn-calling allow-list | the repo's `agent.py` allow-list already includes `qwen3.5`; keep `--use_fn_calling True` and `--model Qwen/Qwen3.5-397B-A17B` |
+| `Can not write for Docker image …: Mirror clone repo must be created first (call .create_mirror)` (swesmith **Go**/non-Python repos, e.g. `bleve`) | the reward path checks the mirror via the **GitHub REST API**, capped at **60 req/hr** unauthenticated; with hundreds of Go instances it gets a 403, which swesmith's bare `except:` misreports as "mirror missing". (The SSH→HTTPS git rewrite does **not** help — this is the API, not git.) | export a scope-less `GITHUB_TOKEN` (mirrors are public; raises limit to 5000/hr) and relaunch: `export GITHUB_TOKEN=…; nohup ./collect.sh swesmith --no_orphan_cleanup &`. The driver prints a `WARNING: GITHUB_TOKEN not set` in preflight if it's missing. |
 | `pull FAILED <image>` | image missing/private or registry hiccup | that image's instances are skipped for the wave; verify the image exists publicly |
 | disk filling up | running with `--keep_images`, or `wave_images` too high | drop `--keep_images`; lower `wave_images` |
 | `HSA_STATUS_ERROR_OUT_OF_RESOURCES … Free mem : 0 MB` (server side) | GPU HBM OOM on the serving replica | a serving-side concern (use `MEM_FRAC=0.7`); the supervisor auto-restarts the replica and the driver resumes |

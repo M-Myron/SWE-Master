@@ -16,7 +16,8 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BLOB="${BLOB_SAS:-$HERE/../blob_sas.sh}"
-EXP="sing_sglang_router_qwen35_397b_8node_v6"
+# EXP="sing_sglang_router_qwen35_397b_8node_v7"
+EXP="sing_sglang_router_qwen35_397b_4node_v3"
 WATCH=""; SECS=6; FULL=""
 for a in "$@"; do
   case "$a" in
